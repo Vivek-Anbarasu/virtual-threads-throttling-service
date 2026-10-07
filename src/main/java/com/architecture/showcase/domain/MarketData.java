@@ -1,3 +1,3 @@
 package com.architecture.showcase.domain;
 
-public record MarketData(String ticker, double price, String sentiment) {}
+public record MarketData(String id, double price, String sentiment) {}

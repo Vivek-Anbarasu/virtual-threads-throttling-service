@@ -16,7 +16,7 @@ void main() {
         // Scaled up to 1000 transactions as requested
         IntStream.range(0, 1000).forEach(i -> {
             executor.submit(() -> {
-                // Throttling to 100 concurrent operations max to safeguard external resources
+                // Throttling to 100 concurrent operations max to safeguard external api
                 throttlingService.executeThrottledTask(() -> {
                     try {
                         String id = "ID-" + i;
