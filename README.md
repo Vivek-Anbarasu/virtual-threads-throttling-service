@@ -1,2 +1,1 @@
-# virtual-threads-throttling-service
-Emphasizes the concurrency + safety pattern
+# High-Throughput Financial Data Aggregator 
