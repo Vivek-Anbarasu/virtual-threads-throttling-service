@@ -3,32 +3,52 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.architecture</groupId>
-    <artifactId>virtual-threads-showcase</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <artifactId>virtual-threads-throttling-service</artifactId>
+    <version>1.0.0</version>
+    <name>virtual-threads-throttling-service</name>
+    <description>Virtual threads and structured concurrency, with an explicit semaphore throttle</description>
 
     <properties>
+        <!--
+          Pinned to 27, not "25+". StructuredTaskScope is still a preview API in 27, so the
+          compiled classes carry the preview minor version and will not run on any other JDK.
+          A looser release would compile and then fail at runtime on 25 or 26 with an
+          UnsupportedClassVersionError, which is a worse failure than a hard pin.
+        -->
         <maven.compiler.release>27</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <junit.version>5.12.2</junit.version>
     </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.15.0</version>
                 <configuration>
+                    <!-- Applies to test compilation as well, which also uses StructuredTaskScope. -->
                     <compilerArgs>
                         <arg>--enable-preview</arg>
                     </compilerArgs>
                 </configuration>
             </plugin>
             <plugin>
-                <groupId>org.codehaus.mojo</groupId>
-                <artifactId>exec-maven-plugin</artifactId>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.6</version>
                 <configuration>
-                    <arguments>
-                        <argument>--enable-preview</argument>
-                    </arguments>
+                    <!-- Without this the forked test JVM refuses to load preview classes. -->
+                    <argLine>--enable-preview</argLine>
                 </configuration>
             </plugin>
         </plugins>
