@@ -2,35 +2,45 @@ import com.architecture.showcase.service.AggregationService;
 import com.architecture.showcase.service.ThrottlingService;
 
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
-
+/**
+ * Demo entry point: 1,000 transactions, each fanning out to two upstream calls, with at most
+ * {@value ThrottlingService#DEFAULT_MAX_CONCURRENT} transactions in flight at once.
+ *
+ * <p>Run with {@code mvn compile exec:java} (the exec plugin passes {@code --enable-preview}).
+ *
+ * <p>The summary reports what actually happened. The previous version printed
+ * "Processed 1000 concurrent transactions successfully!" unconditionally, including when every
+ * task had failed - which made the demo useless as evidence of anything.
+ */
 void main() {
-    IO.println("Starting Concurrency Virtual Threads Showcase...");
-    AggregationService service = new AggregationService();
-    ThrottlingService throttlingService = new ThrottlingService();
+    int transactions = 1_000;
+    int maxConcurrent = ThrottlingService.DEFAULT_MAX_CONCURRENT;
 
-    long startTime = System.currentTimeMillis();
+    var aggregation = new AggregationService();
+    var throttling = new ThrottlingService(maxConcurrent);
+
+    var succeeded = new AtomicInteger();
+    var failed = new AtomicInteger();
+
+    long startedAt = System.nanoTime();
 
     try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-        // Scaled up to 1000 transactions as requested
-        IntStream.range(0, 1000).forEach(i -> {
-            executor.submit(() -> {
-                // Throttling to 100 concurrent operations max to safeguard external api
-                throttlingService.executeThrottledTask(() -> {
+        IntStream.range(0, transactions).forEach(i ->
+                executor.submit(() -> throttling.executeThrottledTask(() -> {
                     try {
-                        String id = "ID-" + i;
-                        service.fetchAggregatedFinancialData(id);
+                        aggregation.fetchAggregatedFinancialData("ID-" + i);
+                        succeeded.incrementAndGet();
                     } catch (Exception e) {
-                        IO.println("Transaction failed for id-" + i + ": " + e.getMessage());
+                        failed.incrementAndGet();
                     }
-                });
-            });
-        });
+                })));
     }
 
-    long endTime = System.currentTimeMillis();
-    IO.println("Processed 1000 concurrent transactions successfully!");
-    IO.println("Total Execution Time: " + (endTime - startTime) + " ms");
-}
+    long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
 
+    IO.println("Aggregated %d of %d transactions in %d ms (throttle: %d concurrent, %d failed)"
+            .formatted(succeeded.get(), transactions, elapsedMillis, maxConcurrent, failed.get()));
+}
