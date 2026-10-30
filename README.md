@@ -1,88 +1,122 @@
-# Java 27 Virtual Threads & Throttling
+# Virtual Threads & Structured Concurrency, with an Explicit Throttle
 
-[![Java Version](https://img.shields.io/badge/Java-27-orange.svg)](https://jdk.java.net/27/)
-[![Build Tool](https://img.shields.io/badge/Build-Maven-blue.svg)](https://maven.apache.org/)
+[![CI](https://github.com/Vivek-Anbarasu/virtual-threads-throttling-service/actions/workflows/ci.yml/badge.svg)](https://github.com/Vivek-Anbarasu/virtual-threads-throttling-service/actions/workflows/ci.yml)
+[![Java](https://img.shields.io/badge/Java-27%20preview-orange.svg)](https://openjdk.org/jeps/505)
 
-A high-performance Java project demonstrating concurrent financial data aggregation using **Virtual Threads** and **Structured Concurrency** natively on **JDK 27**. It highlights how to handle high-throughput, platform-independent executions while safely gating resource access via an explicit `ThrottlingService`.
+A small, tested demonstration of the two Java concurrency features that actually change how a
+service is written — **virtual threads** and **structured concurrency** — plus the part most
+demos skip: what happens when the thing you are fanning out to has a rate limit.
 
-## 🏗️ Architectural Overview
+One transaction fans out to two upstream calls with unequal latency. A thousand transactions
+run at once. At most a hundred are ever in flight.
 
-The project simulates a high-scale environment processing **1000 concurrent financial transactions**. For each transaction, a unique identifier (`ID-0` to `ID-999`) is assigned to isolate and trace operations.
+## The problem this models
+
+| Call | Latency | |
+| --- | --- | --- |
+| `fetchStockPrice()` | 100 ms | independent |
+| `fetchAiSentiment()` | 250 ms | independent |
+
+Sequential execution costs 350 ms per transaction. The calls are independent, so the only
+correct answer is 250 ms — and the only way to get it without leaking threads is to run them
+concurrently and join them as a unit.
+
+## The design
 
 ```
-                  [ 1000 Main Virtual Tasks ]
-                               │
-                ▼ (Throttled to 100 concurrent)
-                    [ ThrottlingService ]
-                      (Java Semaphore)
-                               │
-              ┌────────────────┴────────────────┐
-              ▼                                 ▼
-      [ Subtask: Price ]              [ Subtask: Sentiment ]
-     MockExternalApi::fetch          MockExternalApi::fetch
+  1,000 virtual threads (one per transaction)
+                │
+                ▼
+      ThrottlingService ── Semaphore(100, fair)
+                │           bounds transactions, not calls
+                ▼
+      AggregationService ── StructuredTaskScope.open()
+           │                    │
+           ▼                    ▼
+   fetchStockPrice()    fetchAiSentiment()
+        100 ms               250 ms
 ```
 
-### Key Design Patterns
-1. **Lightweight Concurrency:** Uses `Executors.newVirtualThreadPerTaskExecutor()` to spin up millions of cheap, application-managed threads without saturating OS thread limits.
-2. **Structured Concurrency:** Uses JDK 27's `StructuredTaskScope.open()` to model split/merge subtasks cleanly. If a sibling task fails, the entire scope fails fast and auto-closes, removing memory leaks.
-3. **Concurrency Throttling:** Uses a `Semaphore` boundary inside `ThrottlingService` to limit the execution to **100 active parallel jobs**, preventing downstream target APIs from crashing due to high-volume connection requests.
+Three decisions worth stating:
 
----
+**The scope, not two futures.** A price without a sentiment is not an aggregation. A
+`StructuredTaskScope` makes that structural: if either subtask fails, `join()` fails the whole
+aggregation and cancels the sibling. With two `Future`s there is a path where the caller checks
+one, forgets the other, and returns half a result.
 
-## 🛠️ Project Structure
+**Throttle the transaction, not the call.** The permit is taken around the whole aggregation,
+not around each upstream call. Throttling per call would halve the effective limit — 100 permits
+would admit 50 transactions, each holding two.
 
-```text
-src/main/java/com/architecture/
-│
-├── Main.java                        # System Entrypoint & Virtual Loop
-└── showcase/
-    ├── domain/
-    │   └── MarketData.java          # Record representing aggregated results
-    └── service/
-        ├── AggregationService.java  # StructuredTaskScope Management
-        ├── MockExternalApi.java     # Remote IO Latency Emulation
-        └── ThrottlingService.java   # Semaphore-based Throttling Gating
+**Release only what you took.** The permit is released in a `finally` guarded by an `acquired`
+flag. Releasing unconditionally is a real bug: an interrupted caller that never acquired a
+permit still increments the count, so under cancellation pressure the semaphore drifts above its
+limit and the throttle silently stops throttling.
+
+## Measured
+
+```
+$ java --enable-preview -cp target/classes Main
+Aggregated 1000 of 1000 transactions in 2555 ms (throttle: 100 concurrent, 0 failed)
 ```
 
----
+That is 1,000 transactions ÷ 100 permits = 10 waves × ~250 ms. The arithmetic and the
+measurement agree, which is the only reason the number means anything.
 
-## ⚙️ Prerequisites
+## The preview constraint
 
-To run or build this repository, ensure your environment fulfills the following baseline requisites:
-* **Java Development Kit (JDK) 27** or higher.
-* **Apache Maven 3.6.3** or higher.
+**`StructuredTaskScope` is still a preview API in Java 27.** This is not a detail to gloss over:
 
----
+- Compiled classes carry the preview minor version and **will not load on JDK 25 or 26** —
+  they fail with `UnsupportedClassVersionError`, not a compile error.
+- `--enable-preview` is required at compile time *and* at runtime. The POM passes it to both
+  `maven-compiler-plugin` and the surefire JVM; the command below passes it to `java`.
+- The build is pinned to `<maven.compiler.release>27</maven.compiler.release>` and CI pins
+  JDK 27, deliberately, rather than `latest`.
 
-## 🚀 Getting Started
+When the API finalises, the `--enable-preview` flags come out and the pin can relax.
 
-### 1. Clone the Repository
+## Build and run
+
 ```bash
-git clone https://github.com/Vivek-Anbarasu/virtual-threads-throttling-service.git
-cd virtual-threads-throttling-service
+mvn -q compile
+java --enable-preview -cp target/classes Main
 ```
 
-### 2. Compile the Project
-The project uses custom JVM preview flags defined in the `maven-compiler-plugin` configuration block. Compile the sources using:
+`mvn exec:java` will **not** work: it runs in Maven's own JVM, which is not started with
+`--enable-preview`, so it cannot load the classes.
+
+## Tests
+
 ```bash
-mvn clean compile
+mvn test     # 6 tests
 ```
 
-### 3. Run the Showcase Application
-Execute the compiled project through the `exec-maven-plugin` wrapper, which injects runtime `--enable-preview` parameters natively:
-```bash
-mvn exec:java
+The suite asserts properties rather than timings, because a "took less than 350 ms" assertion
+passes on a fast laptop and flakes on a loaded CI runner:
+
+- **Concurrency is proven with a latch, not a stopwatch.** Each stub call counts down and then
+  waits for the other to also be in flight. If the two calls ran sequentially, the first would
+  wait out its two-second budget and fail. There is no clock in the assertion.
+- **The permit limit is never exceeded** — 40 tasks against 4 permits, with peak concurrency
+  sampled and asserted, and the permit count checked afterwards.
+- **A failing task returns its permit**, and a zero-permit throttle is rejected rather than
+  deadlocking every caller.
+- **A failing subtask fails the aggregation** instead of yielding a partially built result.
+
+## Layout
+
+```
+src/main/java/com/architecture/showcase/
+├── Main.java                          demo entry point (implicit class, Java 25+)
+├── domain/MarketData.java             the aggregate: id, price, sentiment
+└── service/
+    ├── MarketDataApi.java             the two upstream calls, injectable for tests
+    ├── MockExternalApi.java           demo client: 100 ms and 250 ms of latency
+    ├── AggregationService.java        structured fan-out and join
+    └── ThrottlingService.java         fair semaphore, leak-free release
 ```
 
----
+## Licence
 
-## 📊 Sample Execution Log
-
-Upon launching, the console output trace should look like the following:
-
-```text
-Starting Concurrency Virtual Threads Showcase...
-Processed 1000 concurrent transactions successfully!
-Total Execution Time: 2540 ms
-```
-*(Execution time will vary based on hardware thread allocation capacity and internal service thread scheduling efficiency).*
+MIT — see [LICENSE](LICENSE).
